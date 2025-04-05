@@ -10,189 +10,188 @@
 
 # <pep8 compliant>
 
-import unittest.mock  # To mock away the Blender API.
+import collections  # For named tuples.
+import idprop.types  # To interpret property groups as metadata entries.
 
-from .mock.bpy import MockOperator, MockExportHelper, MockImportHelper
-
-# The import and export classes inherit from classes from the Blender API. These classes would be MagicMocks as well.
-# However their metaclasses are then also MagicMocks, but different instances of MagicMock.
-# Python sees this as that the metaclasses that ImportHelper/ExportHelper inherits from are not the same and raises an
-# error. So here we need to specify that the classes that they inherit from are NOT MagicMock but just an ordinary mock
-# object.
-import bpy.types
-import bpy_extras.io_utils
-bpy.types.Operator = MockOperator
-bpy_extras.io_utils.ImportHelper = MockImportHelper
-bpy_extras.io_utils.ExportHelper = MockExportHelper
-import io_mesh_3mf.metadata  # Now finally we can import the unit under test.
+MetadataEntry = collections.namedtuple("MetadataEntry", ["name", "preserve", "datatype", "value"])
 
 
-class TestMetadata(unittest.TestCase):
+class Metadata:
     """
-    Unit tests for the metadata storage class.
+    This class tracks the metadata of a Blender object.
+
+    You can use it to update the metadata when importing, or to get the scene's metadata when exporting. It has a
+    routine to store the metadata in a Blender object and to retrieve it from that Blender object again.
+
+    This class functions like a temporary data structure only. It is blissfully unaware of the intricacies of the 3MF
+    file format specifically, save for knowing all of the properties of a metadata entry that can be specified.
+
+    The class' signature is like a dictionary. The keys of the dictionary are the names of the metadata entries. The
+    values of the dictionary are MetadataEntry named tuples, containing several properties of the metadata entries as
+    can be specified in the 3MF format. However the behaviour of the class is not entirely like a dictionary, since this
+    dictionary will only store metadata that is consistent across all of the attempts to store metadata. If you store
+    the same metadata entry multiple times, it will store only one copy, which is like a dictionary. However if you
+    store an entry with the same name but a different value, it'll know that the metadata is inconsistent across the
+    different files and thus will pretend that this metadata entry was not set. This way, if you load multiple 3MF files
+    into one scene in Blender, you will only get the intersection of the matching metadata entries.
     """
 
-    def setUp(self):
+    def __init__(self):
         """
-        Creates some fixtures to test with.
+        Create an empty storage of metadata.
         """
-        self.metadata = io_mesh_3mf.metadata.Metadata()
+        self.metadata = {}
 
-    def test_store_retrieve(self):
+    def __setitem__(self, key, value):
         """
-        Test the simple storage and retrieval of a metadata entry.
+        Add a metadata entry to this storage.
+        :param key: The name of the entry.
+        :param value: A `MetadataEntry` object to store.
         """
-        self.metadata["fast"] = "yes, please"
-        self.assertEqual(self.metadata["fast"], "yes, please")
+        if key not in self.metadata:
+            # Completely new value. We can just store this one, since it's always consistent with existing metadata.
+            self.metadata[key] = value
+            return
 
-    def test_store_compatible(self):
+        if self.metadata[key] is None:
+            # This entry was already in conflict with another entry and erased.
+            # The new value will also be in conflict with at least one, so should also not be stored.
+            return
+
+        competing = self.metadata[key]
+        if value.value != competing.value or value.datatype != competing.datatype:
+            # These two are inconsistent. Erase both!
+            self.metadata[key] = None
+            return
+
+        # The two are consistent. Usually no need to store anything, since it's already stored.
+        # The "preserve" property may be different. Preserve if any of them says to preserve.
+        if not competing.preserve and value.preserve:  # Prevent unnecessary construction of namedtuples.
+            self.metadata[key] = MetadataEntry(
+                name=key,
+                preserve=True,
+                datatype=competing.datatype,
+                value=competing.value)
+
+    def __getitem__(self, key):
         """
-        Test storing an entry multiple times with compatible values.
+        Retrieves a metadata entry, if it exists and was not in conflict.
+        :param key: The name of the metadata entry to get.
+        :return: The `MetadataEntry` object stored there.
+        :raises: `KeyError` if there is no metadata entry or it was in conflict.
         """
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")  # Store twice!
+        if key not in self.metadata or self.metadata[key] is None:
+            # Metadata entry doesn't exist, or its values are conflicting with each other across multiple files.
+            raise KeyError(key)
+        return self.metadata[key]
 
-        self.assertEqual(self.metadata["duplicate"].name, "duplicate", "The name was the same, still \"duplicate\".")
-        self.assertFalse(
-            self.metadata["duplicate"].preserve,
-            "Neither of the entries needed to be preserved, so it still doesn't need to be preserved.")
-        self.assertEqual(self.metadata["duplicate"].datatype, "int", "The data type was the same, still \"int\".")
-        self.assertEqual(self.metadata["duplicate"].value, "5", "The value was the same, still \"5\".")
-
-    def test_override_preserve(self):
+    def __contains__(self, item):
         """
-        Tests the overriding of the preserve attribute if metadata entries are compatible.
+        Tests if a metadata entry with a certain name is present and not in conflict.
+        :param item: The name of the metadata entry to test for.
+        :return: `True` if the metadata entry is present and not in conflict, or `False` if it's not present or in
+        conflict with metadata values from multiple files.
         """
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=True,
-            datatype="int",
-            value="5")  # Preserve the duplicate!
+        return item in self.metadata and self.metadata[item] is not None
 
-        self.assertTrue(
-            self.metadata["duplicate"].preserve,
-            "If any of the duplicates needs to be preserved, the entry indicates that it needs to be preserved.")
-
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.assertTrue(
-            self.metadata["duplicate"].preserve,
-            "An older entry needed to be preserved, so even if the later entry didn't, it still needs to be preserved.")
-
-    def test_store_incompatible_value(self):
+    def __bool__(self):
         """
-        Tests storing metadata entries that are incompatible with each other because they have different values.
+        Checks if there is any content in this metadata storage.
+
+        Conflicting metadata entries are not counted as content in this case.
+        :return: `True` if there is metadata in this storage, or `False` if there isn't any.
         """
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="6")  # Different value!
+        return any(self.values())
 
-        self.assertNotIn("duplicate", self.metadata, "It should appear to be removed from the storage.")
-        with self.assertRaises(KeyError):
-            print("Getting this value should be impossible:", self.metadata["duplicate"])
-
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")  # Add it again.
-
-        self.assertNotIn("duplicate", self.metadata, "Since there's conflicts, it should not add it to the storage.")
-        with self.assertRaises(KeyError):
-            print("Getting this value should be impossible:", self.metadata["duplicate"])
-
-    def test_store_incompatible_type(self):
+    def __len__(self):
         """
-        Tests storing metadata entries that are incompatible with each other because they have different types.
+        Returns the number of valid items in this metadata storage.
+
+        An item is only valid if it's not in conflict, i.e. if it would be present in an iteration over the storage.
+        :return: The number of valid metadata entries.
         """
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="float",
-            value="5")  # Different data type!
+        return sum(1 for _ in self.values())
 
-        self.assertNotIn("duplicate", self.metadata, "It should appear to be removed from the storage.")
-        with self.assertRaises(KeyError):
-            print("Getting this value should be impossible:", self.metadata["duplicate"])
-
-        self.metadata["duplicate"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="duplicate",
-            preserve=False,
-            datatype="float",
-            value="5")  # Add it again.
-
-        self.assertNotIn("duplicate", self.metadata, "Since there's conflicts, it should not add it to the storage.")
-        with self.assertRaises(KeyError):
-            print("Getting this value should be impossible:", self.metadata["duplicate"])
-
-    def test_values(self):
+    def __delitem__(self, key):
         """
-        Test getting the metadata values.
-        """
-        self.metadata["hollow"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="hollow",
-            preserve=True,
-            datatype="bool",
-            value="True")
-        self.metadata["conflicting"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="conflicting",
-            preserve=False,
-            datatype="int",
-            value="5")
-        self.metadata["conflicting"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="conflicting",
-            preserve=False,
-            datatype="float",
-            value="5.0")  # Should not show up in the values.
-        self.metadata["author"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="author",
-            preserve=False,
-            datatype="string",
-            value="Ghostkeeper")
-        self.metadata["author"] = io_mesh_3mf.metadata.MetadataEntry(
-            name="author",
-            preserve=False,
-            datatype="string",
-            value="Ghostkeeper")  # Duplicate, but not conflicting.
+        Completely delete all traces of a metadata entry from this storage.
 
-        num_entries = 0  # Count how many, to prevent listing duplicates twice or something.
-        for entry in self.metadata.values():
-            self.assertIn(
-                entry.name,
-                {"hollow", "author"},
-                "The \"hollow\" and \"author\" entries need to be stored. "
-                "Not \"conflicting\" because there was a conflict.")
-            num_entries += 1
-        self.assertEqual(
-            num_entries,
-            2,
-            "There were two valid entries: \"hollow\" and \"author\". "
-            "\"conflicting\" shouldn't show up at all and there should only be one \"author\".")
+        Even if there was no real entry, but the shadow of entries being in conflict, that information will be removed.
+        That way it'll allow for a new value to be stored.
+
+        Contrary to the normal dictionary's version, this one does check for the key's existence, so you don't need to
+        do that manually.
+        """
+        if key in self.metadata:
+            del self.metadata[key]
+
+    def __eq__(self, other):
+        """
+        Compares two metadata groups together.
+
+        This is currently just used for the unit tests to see if the metadata is constructed correctly.
+        :param other: The metadata object to compare to.
+        :return: `True` if the two groups of metadata contain the same metadata (including which entries are in
+        conflict), or `False` otherwise.
+        """
+        return self.metadata == other.metadata
+
+    def store(self, blender_object):
+        """
+        Store this metadata in a Blender object.
+
+        The metadata will be stored as Blender properties. In the case of properties known to Blender they will be
+        translated appropriately.
+        :param blender_object: The Blender object to store the metadata in.
+        """
+        for metadata_entry in self.values():
+            name = metadata_entry.name
+            value = metadata_entry.value
+            if name == "Title":  # Has a built-in ID property for objects as well as scenes.
+                blender_object.name = value
+            elif name == "3mf:partnumber":
+                # Special case: This is always a string and doesn't need the preserve attribute. We can simplify this to
+                # make it easier to edit.
+                blender_object[name] = value
+            else:
+                blender_object[name] = {
+                    "datatype": metadata_entry.datatype,
+                    "preserve": metadata_entry.preserve,
+                    "value": value,
+                }
+
+    def retrieve(self, blender_object):
+        """
+        Retrieve metadata from a Blender object.
+
+        The metadata will get stored in this existing instance.
+
+        The metadata from the Blender object will get merged with the data that already exists in this instance. In case
+        of conflicting metadata values, those metadata entries will be left out.
+        :param blender_object: A Blender object to retrieve metadata from.
+        """
+        for key in blender_object.keys():
+            entry = blender_object[key]
+            if key == "3mf:partnumber":
+                self[key] = MetadataEntry(name=key, preserve=True, datatype="xs:string", value=entry)
+                continue
+            if isinstance(entry, idprop.types.IDPropertyGroup)\
+                    and "datatype" in entry.keys()\
+                    and "preserve" in entry.keys()\
+                    and "value" in entry.keys():  # Most likely a metadata entry from a previous 3MF file.
+                self[key] = MetadataEntry(
+                    name=key,
+                    preserve=entry.get("preserve"),
+                    datatype=entry.get("datatype"),
+                    value=entry.get("value"))
+            # Don't mess with metadata added by the user or their other Blender add-ons. Don't want to break their
+            # behaviour.
+
+        self["Title"] = MetadataEntry(name="Title", preserve=True, datatype="xs:string", value=blender_object.name)
+
+    def values(self):
+        """
+        Return all metadata entries that are registered in this storage and not in conflict.
+        :return: A generator of metadata entries.
+        """
+        yield from filter(lambda entry: entry is not None, self.metadata.values())
