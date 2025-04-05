@@ -60,21 +60,6 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
     directory: bpy.props.StringProperty(subtype='DIR_PATH')
     global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, soft_min=0.001, soft_max=1000.0, min=1e-6, max=1e6)
 
-    def __init__(self):
-        """
-        Initializes the importer with empty fields.
-        """
-        super().__init__()
-        self.resource_objects = {}  # Dictionary mapping resource IDs to ResourceObjects.
-
-        # Dictionary mapping resource IDs to dictionaries mapping indexes to ResourceMaterial objects.
-        self.resource_materials = {}
-
-        # Which of our resource materials already exists in the Blender scene as a Blender material.
-        self.resource_to_material = {}
-
-        self.num_loaded = 0
-
     def execute(self, context):
         """
         The main routine that reads out the 3MF file.
@@ -107,6 +92,9 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
         if bpy.ops.object.select_all.poll():
             bpy.ops.object.select_all(action='DESELECT')  # Deselect other files.
 
+        items_to_build = []
+        self.resource_objects = {}
+        self.resource_materials = {}
         for path in paths:
             files_by_content_type = self.read_archive(path)  # Get the files from the archive.
 
@@ -134,12 +122,14 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
                     # information we can.
 
                 scale_unit = self.unit_scale(context, root)
-                self.resource_objects = {}
-                self.resource_materials = {}
                 scene_metadata = self.read_metadata(root, scene_metadata)
                 self.read_materials(root)
                 self.read_objects(root)
-                self.build_items(root, scale_unit)
+
+                items_to_build.append((root, scale_unit))
+
+        for (item_to_build_root, item_to_build_scale_unit) in items_to_build:
+            self.build_items(item_to_build_root, item_to_build_scale_unit)
 
         scene_metadata.store(bpy.context.scene)
         annotations.store()
@@ -462,7 +452,7 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
                 except KeyError:
                     log.warning(
                         f"Object with ID {objectid} refers to material collection {pid} with index {pindex}"
-                        f" which doesn't exist.")
+                        f"which doesn't exist.")
                 except ValueError:
                     log.warning(f"Object with ID {objectid} specifies material index {pindex}, which is not integer.")
 
