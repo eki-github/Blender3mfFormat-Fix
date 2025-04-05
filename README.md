@@ -1,6 +1,7 @@
 Blender 3MF Format
 ====
 > ✅ **Fixed for Blender 4.4 and importing files from BambuLab**
+
 This is a Blender add-on that allows importing and exporting 3MF files.
 
 3D Manufacturing Format files (.3mf) are a file format for triangular meshes intended to serve as exchange format for 3D printing applications. They can communicate not only the model, but also the intent and material of a 3D printing job from the CAD software to the CAM software (slicer). In this scenario, Blender serves as the CAD software. To that end, the aim of this add-on is to make Blender a more viable alternative as CAD software for additive manufacturing.
